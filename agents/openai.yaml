@@ -1,0 +1,4 @@
+interface:
+  display_name: "标杆案例自动剪辑"
+  short_description: "连贯压缩口播、匹配低重复B-roll并生成剪映草稿"
+  default_prompt: "请使用 $benchmark-case-video-editor 检查素材，生成连贯的A-roll文稿，以每条素材最多两次的规则匹配B-roll，并输出可复核的剪映草稿。"

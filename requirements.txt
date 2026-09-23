@@ -1,0 +1,5 @@
+faster-whisper>=1.1,<2
+imageio-ffmpeg>=0.6,<1
+opencc-python-reimplemented>=0.1.7,<1
+Pillow>=10,<13
+numpy>=1.26,<3

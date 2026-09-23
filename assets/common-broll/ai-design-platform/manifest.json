@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "case_type": "ai",
+  "usage": "AI智能设计平台类标杆案例通用B-roll",
+  "clips": [
+    {
+      "path": "快速导入户型/快速导入户型-1.mp4",
+      "description": "酷家乐AI智能设计平台快速导入户型图",
+      "tags": ["ai_design_platform", "floor_plan"]
+    },
+    {
+      "path": "快速风格选择/快速风格选择-1.mp4",
+      "description": "酷家乐AI智能设计平台快速选择设计风格",
+      "tags": ["ai_design_platform", "designer_ai_rendering", "ai_rendering"]
+    },
+    {
+      "path": "快速局部调整/快速局部调整-1.mp4",
+      "description": "酷家乐AI智能设计平台快速进行局部调整",
+      "tags": ["ai_design_platform", "designer_ai_rendering"]
+    },
+    {
+      "path": "全屋漫游全景图/全屋漫游全景图-1.mp4",
+      "description": "酷家乐AI生成全屋漫游全景图并展示空间效果",
+      "tags": ["ai_design_platform", "ai_rendering", "rendering_display", "showroom_interior"]
+    },
+    {
+      "path": "一键生成全屋效果图/一键生成全屋效果图-1.mp4",
+      "description": "酷家乐AI一键生成全屋效果图",
+      "tags": ["ai_design_platform", "ai_rendering", "designer_ai_rendering", "rendering_display"]
+    },
+    {
+      "path": "AI设计平台首页/AI设计平台首页.mp4",
+      "description": "酷家乐AI智能设计平台首页与功能入口",
+      "tags": ["ai_design_platform"]
+    },
+    {
+      "path": "AI效果图增强/AI效果图增强-1.mp4",
+      "description": "酷家乐AI增强效果图质量与细节",
+      "tags": ["ai_design_platform", "ai_rendering", "designer_ai_rendering"]
+    }
+  ]
+}
