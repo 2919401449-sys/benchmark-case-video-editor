@@ -51,6 +51,10 @@ class EditorialQualityTests(unittest.TestCase):
         self.assertEqual(''.join(parts),text)
         self.assertTrue(all(3<=len(p)<=18 for p in parts))
 
+    def test_thousands_separator_does_not_split_caption(self):
+        parts=split_caption_text('整体单值约80,000元',18)
+        self.assertEqual(parts,['整体单值约80000元'])
+
     def test_caption_uses_spoken_onset_not_paragraph_start(self):
         plan=self.plan()
         transcript={'files':[{'source':'a','segments':[{'text':'大家好','start':2,'end':3,
@@ -86,6 +90,10 @@ class EditorialQualityTests(unittest.TestCase):
     def test_ai_case_detection_and_common_library(self):
         self.assertEqual(detect_project_case_type(Path('客户_AI智能设计平台')), 'ai')
         self.assertEqual(detect_project_case_type(Path('客户_生产对接')), 'production')
+        self.assertEqual(
+            detect_project_case_type(Path('客户_生产对接'), explicit='ai'),
+            'ai',
+        )
         clips=load_common_ai_broll()
         self.assertEqual(len(clips),7)
         self.assertTrue(all(item['path'].is_file() and item['tags'] for item in clips))

@@ -13,7 +13,7 @@ import subprocess
 from difflib import SequenceMatcher
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFilter
 
 import chart_pipeline as cp
 from pipeline import find_ffmpeg, normalize_text
@@ -144,7 +144,7 @@ def sync_charts(work):
                 item = locate_cue(cue, subtitles[section], clip, file)
                 item["reveal_at"] = round(round(item["timeline_in"] * fps) / fps, 4)
                 resolved.append(item)
-            if chart["template"] in ("flow", "list"):
+            if chart["template"] in ("flow", "list", "parallelism"):
                 ordered = [next(c["reveal_at"] for c in resolved if c["key"] == key) for key in expected_keys(chart)]
                 if ordered != sorted(ordered):
                     raise ValueError("列表或流程的顺序与实际口播不一致。")
@@ -340,6 +340,28 @@ def _bilingual_heading(image, chart, left, right, top, chinese_size=56):
     d.ellipse((cx - 5, line_y - 5, cx + 5, line_y + 5), fill=(150, 236, 223, 230))
 
 
+BILINGUAL_COMPARISON_CENTERS = (590, 1330)
+BILINGUAL_COMPARISON_RING_CY = 605
+BILINGUAL_COMPARISON_RING_RADIUS = 224
+
+
+def bilingual_comparison_text_boxes(cx):
+    """Return inscribed text zones that cannot touch the comparison ring.
+
+    The previous template allowed labels and values to use almost the full
+    ring diameter.  Long Chinese phrases could therefore reach the circular
+    stroke even after font fitting.  These boxes stay inside the ring's inner
+    clear area and deliberately leave independent vertical zones for the
+    Chinese label, English label, Chinese value, and English value.
+    """
+    return {
+        "column": (cx - 145, 458, cx + 145, 500),
+        "column_en": (cx - 150, 503, cx + 150, 534),
+        "value": (cx - 165, 548, cx + 165, 650),
+        "value_en": (cx - 150, 674, cx + 150, 714),
+    }
+
+
 def bilingual_layers_for_chart(chart, style):
     """Fine-line bilingual theme with explicit non-overlapping text zones."""
     blue = style.get("brand_color", "#1685F8")
@@ -421,9 +443,9 @@ def bilingual_fullscreen_comparison(chart, style):
     _bilingual_heading(base, chart, 240, 1680, 78, 68)
     draw_label(base, (690, 226, 1230, 274), row["label"], "#F7FBFF", 34, 22)
     draw_label(base, (720, 270, 1200, 306), row["label_en"], "#BFE4E7", 21, 13)
-    centers = (590, 1330)
+    centers = BILINGUAL_COMPARISON_CENTERS
     for index, cx in enumerate(centers):
-        cy, radius = 605, 224
+        cy, radius = BILINGUAL_COMPARISON_RING_CY, BILINGUAL_COMPARISON_RING_RADIUS
         if index == 0:
             d.ellipse((cx-radius, cy-radius, cx+radius, cy+radius), outline=(217,249,246,230), width=5)
             d.ellipse((cx-radius+25, cy-radius+25, cx+radius-25, cy+radius-25),
@@ -441,16 +463,18 @@ def bilingual_fullscreen_comparison(chart, style):
                       fill=(145,240,223,235) if segment % 3 else (255,177,164,235), width=10)
             d.ellipse((cx-radius+35, cy-radius+35, cx+radius-35, cy+radius-35),
                       outline=(217,249,246,105), width=3)
-        draw_label(base, (cx-230, 396, cx+230, 451), chart["columns"][index], "#F7FBFF", 38, 24)
-        draw_label(base, (cx-220, 450, cx+220, 485), columns_en[index], "#BFE4E7", 21, 13)
+        text_boxes = bilingual_comparison_text_boxes(cx)
+        draw_label(base, text_boxes["column"], chart["columns"][index], "#F7FBFF", 36, 22)
+        draw_label(base, text_boxes["column_en"], columns_en[index], "#BFE4E7", 19, 12)
     d.line((914, 610, 982, 610), fill=(233,251,251,220), width=4)
     d.polygon(((982,599),(1005,610),(982,621)), fill=(233,251,251,230))
     for index, side in enumerate(("before", "after")):
         layer = blank()
         cx = centers[index]
-        draw_label(layer, (cx-205, 535, cx+205, 665), row[side],
+        text_boxes = bilingual_comparison_text_boxes(cx)
+        draw_label(layer, text_boxes["value"], row[side],
                    "#F7FBFF" if index == 0 else "#91F0DF", 104, 40)
-        draw_label(layer, (cx-190, 680, cx+190, 723), row[f"{side}_en"],
+        draw_label(layer, text_boxes["value_en"], row[f"{side}_en"],
                    "#D0ECEE", 25, 15)
         layers.append((f"row_1_{side}", layer))
     return base, layers
@@ -657,6 +681,105 @@ def encode_ring(path, seconds, fps, style=None, placement="left", variant="halo"
             raise RuntimeError(f"透明圆环生成失败：{path.with_suffix('.log')}")
 
 
+PARALLELISM_ACCENTS = ((74, 220, 255), (64, 145, 255), (134, 105, 255),
+                       (255, 153, 104), (86, 225, 176))
+
+
+def _ease_out_back(value):
+    value = max(0.0, min(1.0, value))
+    c1 = 1.70158
+    return 1 + (c1 + 1) * (value - 1) ** 3 + c1 * (value - 1) ** 2
+
+
+def _parallelism_card(number, chinese, english, accent):
+    width, height = 1450, 126
+    shadow = Image.new("RGBA", (width + 50, height + 50), (0, 0, 0, 0))
+    sd = ImageDraw.Draw(shadow)
+    sd.rounded_rectangle((25, 25, width + 24, height + 24), 25,
+                         fill=(*accent, 95), outline=(*accent, 130), width=4)
+    shadow = shadow.filter(ImageFilter.GaussianBlur(18))
+    card = Image.new("RGBA", shadow.size, (0, 0, 0, 0))
+    card.alpha_composite(shadow)
+    draw = ImageDraw.Draw(card)
+    box = (25, 25, width + 24, height + 24)
+    draw.rounded_rectangle(box, 25, fill=(8, 27, 53, 238), outline=(*accent, 235), width=3)
+    draw.rounded_rectangle((25, 25, 42, height + 24), 8, fill=(*accent, 255))
+    draw.ellipse((70, 49, 142, 121), fill=(*accent, 42), outline=(*accent, 255), width=3)
+    draw.text((106, 85), number, font=cp.font(26, True), fill=(239, 250, 255, 255), anchor="mm")
+    chinese_font = cp.fit_font(draw, chinese, 820, 58, 36, True)
+    draw.text((185, 87), chinese, font=chinese_font, fill=(250, 253, 255, 255), anchor="lm")
+    english_font = cp.fit_font(draw, english, 410, 25, 15, False)
+    draw.text((1384, 87), english, font=english_font, fill=(*accent, 238), anchor="rm")
+    return card
+
+
+def _parallelism_cards(chart):
+    items = chart["items"]
+    items_en = chart["items_en"]
+    return [_parallelism_card(f"{index:02d}", chinese, str(english),
+                              PARALLELISM_ACCENTS[(index - 1) % len(PARALLELISM_ACCENTS)])
+            for index, (chinese, english) in enumerate(zip(items, items_en), 1)]
+
+
+def parallelism_frame(chart, time_seconds, seconds, cue_offsets, style=None, cards=None):
+    items = chart["items"]
+    cards = cards or _parallelism_cards(chart)
+    frame = blank()
+    ramp = min(0.28, seconds / 4)
+    global_alpha = min(1.0, time_seconds / max(ramp, 0.01),
+                       max(0.0, (seconds - time_seconds) / max(ramp, 0.01)))
+    if global_alpha <= 0:
+        return frame
+    frame.alpha_composite(Image.new("RGBA", frame.size, (3, 12, 27, round(183 * global_alpha))))
+    draw = ImageDraw.Draw(frame)
+    heading_alpha = round(255 * min(1.0, time_seconds / 0.42) * global_alpha)
+    draw.text((960, 125), chart["title"], font=cp.font(74, True),
+              fill=(247, 252, 255, heading_alpha), anchor="mm")
+    draw.text((960, 182), chart["title_en"], font=cp.font(25),
+              fill=(147, 207, 230, heading_alpha), anchor="mm")
+    draw.line((670, 220, 1250, 220), fill=(129, 216, 238, round(150 * global_alpha)), width=2)
+    draw.ellipse((952, 214, 968, 230), fill=(105, 236, 225, round(235 * global_alpha)))
+    count = len(items)
+    pitch = 145 if count == 5 else 155
+    first_y = 230 + max(0, (5 - count) * 28)
+    for index, (card, cue) in enumerate(zip(cards, cue_offsets)):
+        if time_seconds < cue:
+            continue
+        elapsed = time_seconds - cue
+        eased = _ease_out_back(min(1.0, elapsed / 0.34))
+        direction = -1 if index % 2 == 0 else 1
+        x = 210 + round(direction * 920 * (1 - eased))
+        y = first_y + index * pitch
+        scale = 0.92 + 0.08 * eased
+        sprite = card if abs(scale - 1) <= 0.002 else card.resize(
+            (round(card.width * scale), round(card.height * scale)), Image.Resampling.LANCZOS)
+        opacity = round(255 * min(1.0, elapsed / 0.11) * global_alpha)
+        if opacity < 255:
+            sprite = sprite.copy()
+            sprite.putalpha(sprite.getchannel("A").point(lambda value: value * opacity // 255))
+        frame.alpha_composite(sprite, (x - (sprite.width - card.width) // 2,
+                                       y - (sprite.height - card.height) // 2))
+    return frame
+
+
+def encode_parallelism(path, chart, seconds, fps, cue_offsets, style=None):
+    ffmpeg = find_ffmpeg()
+    command = [ffmpeg, "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", "rgba", "-s", "1920x1080",
+               "-r", str(fps), "-i", "pipe:0", "-an", "-c:v", "prores_ks", "-profile:v", "4",
+               "-pix_fmt", "yuva444p10le", "-alpha_bits", "16", "-threads", "4", str(path)]
+    with path.with_suffix(".log").open("wb") as errors:
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=errors)
+        cards = _parallelism_cards(chart)
+        try:
+            for index in range(round(seconds * fps)):
+                process.stdin.write(parallelism_frame(chart, index / fps, seconds, cue_offsets,
+                                                       style, cards).tobytes())
+        finally:
+            process.stdin.close()
+        if process.wait() != 0:
+            raise RuntimeError(f"排比冲击动效生成失败：{path.with_suffix('.log')}")
+
+
 def render_motion(work, plan_path=None):
     plan_path = plan_path or work / "chart_plan.json"
     plan = cp.load_json(plan_path)
@@ -674,6 +797,28 @@ def render_motion(work, plan_path=None):
     stat_ordinal = 0
     for chart in plan["charts"]:
         print(f"渲染动态图表 {chart['id']} {chart['title']}", flush=True)
+        if chart["template"] == "parallelism":
+            start, end = float(chart["timeline_in"]), float(chart["timeline_out"])
+            seconds = end - start
+            cues = {cue["key"]: cue for cue in chart["synced_cues"]}
+            cue_offsets = [max(0.0, float(cues[f"item_{index}"]["reveal_at"]) - start)
+                           for index in range(1, len(chart["items"]) + 1)]
+            path = directory / f"{chart['id']}_parallelism.mov"
+            encode_parallelism(path, chart, seconds, fps, cue_offsets, plan.get("style", {}))
+            record = {"chart_id": chart["id"], "layer_key": "parallelism_motion",
+                      "source": str(path.resolve()), "source_in": 0, "source_out": seconds,
+                      "timeline_in": start, "timeline_out": end, "title": chart["title"],
+                      "status": "approved", "template": "parallelism", "z_group": 30,
+                      "section_ids": chart["section_ids"]}
+            materials.append({"path": str(path.resolve()), "width": 1920, "height": 1080,
+                              "duration_seconds": seconds})
+            poster = parallelism_frame(chart, min(seconds - 0.05, max(cue_offsets) + 0.8),
+                                       seconds, cue_offsets, plan.get("style", {}))
+            target = directory / f"{chart['id']}_poster.png"
+            poster.save(target)
+            posters.append(target)
+            rendered.append({"id": chart["id"], "source": str(target.resolve()), "layers": [record]})
+            continue
         base, layers = layers_for_chart(chart, plan.get("style", {}))
         from chart_layout import transform_layer, render_blur
         source_box = base.getbbox()
@@ -755,6 +900,7 @@ def attach_motion(work, base_plan_path=None):
         if not Path(layer["source"]).is_file():
             raise FileNotFoundError(layer["source"])
     result = cp.load_json(base_plan_path)
+    cp.suppress_broll_under_blurred_charts(result, plan)
     result.setdefault("tracks", {})["graphics"] = graphics
     result["chart_metrics"] = {"count": len(plan["charts"]), "layer_count": len(graphics),
                                "approved_count": len(plan["charts"]), "review_required": False,

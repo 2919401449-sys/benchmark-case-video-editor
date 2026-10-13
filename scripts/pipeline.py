@@ -135,8 +135,16 @@ def find_script(project: Path) -> Path | None:
     return candidates[0] if candidates else None
 
 
-def detect_project_case_type(project: Path, script: Path | None = None) -> str | None:
+def detect_project_case_type(
+    project: Path,
+    script: Path | None = None,
+    explicit: str | None = None,
+) -> str | None:
     """Identify the series without treating V0 as edit copy."""
+    if explicit:
+        if explicit not in {"ai", "production"}:
+            raise ValueError(f"未知案例类型：{explicit}")
+        return explicit
     folder_hint = project.name.lower()
     if "生产对接" in folder_hint or "设计生产一体化" in folder_hint:
         return "production"
@@ -186,7 +194,7 @@ def broll_origin_priority_bonus(item: dict[str, Any]) -> float:
     return 30.0 if item.get("origin") == "skill_common_ai" else 0.0
 
 
-def inspect_project(project: Path, work: Path) -> dict[str, Any]:
+def inspect_project(project: Path, work: Path, case_type_override: str | None = None) -> dict[str, Any]:
     ffmpeg = find_ffmpeg()
     script = find_script(project)
     aroll = list_videos(project / "A-roll")
@@ -194,7 +202,7 @@ def inspect_project(project: Path, work: Path) -> dict[str, Any]:
     if not aroll:
         raise FileNotFoundError("没有在 A-roll 文件夹中找到视频。")
 
-    case_type = detect_project_case_type(project, script)
+    case_type = detect_project_case_type(project, script, case_type_override)
     project_broll_items = []
     for path in project_broll:
         media = probe_media(path, ffmpeg)
@@ -2034,6 +2042,7 @@ def apply_v2_editorial_plan(
         reviewed_blocks.append(
             {
                 "speaker": speaker,
+                "purpose": str(block.get("purpose") or "").strip(),
                 "orders": orders,
                 "reason": block.get("reason", "AI语义审阅：保留完整表达"),
                 "source_seconds": round(
@@ -2041,6 +2050,23 @@ def apply_v2_editorial_plan(
                 ),
             }
         )
+
+    if reviewed_blocks:
+        opening = reviewed_blocks[0]
+        opening_items = [by_order[int(order)] for order in opening["orders"]]
+        opening_text = "".join(str(item.get("text") or "") for item in opening_items)
+        company_cues = ("公司", "建材", "家居", "装饰", "整装", "服务商", "企业")
+        profile_cues = ("成立", "扎根", "专注", "主营", "生产", "研发", "销售", "升级", "提供")
+        if opening["speaker"] != primary:
+            errors.append(f"全片开场必须由最高职位者 {primary} 介绍公司")
+        if opening.get("purpose") != "company_intro":
+            errors.append("第一个语义段必须填写 purpose=company_intro")
+        if not any(cue in opening_text for cue in company_cues) or not any(
+            cue in opening_text for cue in profile_cues
+        ):
+            errors.append("第一个语义段没有形成可识别的公司背景介绍")
+    else:
+        errors.append("V2语义计划没有任何语义段")
 
     speakers = list(dict.fromkeys(item["speaker"] for item in sentences))
     missing_speakers = [
@@ -2142,6 +2168,14 @@ def apply_v2_editorial_plan(
         "paragraph_by_order": paragraph_by_order,
         "remaining_defects": defects,
         "reviewed_blocks": reviewed_blocks,
+        "sequence_orders": [
+            int(order) for block in reviewed_blocks for order in block["orders"]
+        ],
+        "opening_company_intro": bool(
+            reviewed_blocks
+            and reviewed_blocks[0]["speaker"] == primary
+            and reviewed_blocks[0].get("purpose") == "company_intro"
+        ),
         "requires_review": False,
     }
     balance_report = {
@@ -2615,7 +2649,14 @@ def shorten_script(
                 int(item["order"])
             )
         output_sentences.append(output)
-    kept_sentences = [item for item in output_sentences if item["kept"]]
+    sequence_orders = [int(value) for value in coherence_report.get("sequence_orders", [])]
+    if sequence_orders:
+        kept_by_order = {
+            int(item["order"]): item for item in output_sentences if item["kept"]
+        }
+        kept_sentences = [kept_by_order[order] for order in sequence_orders]
+    else:
+        kept_sentences = [item for item in output_sentences if item["kept"]]
     speaker_distribution = []
     for speaker in speakers:
         speaker_items = [item for item in kept_sentences if item["speaker"] == speaker]
@@ -3164,6 +3205,30 @@ def choose_quality_window(
     }
 
 
+def _round_robin_timeline_thirds(sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Give late sections access to finite source-use capacity before it is exhausted."""
+    durations = [
+        max(0.0, float(item.get("source_out") or 0.0) - float(item.get("source_in") or 0.0))
+        for item in sections
+    ]
+    total = sum(durations)
+    if total <= 0:
+        return list(sections)
+    bins: list[list[dict[str, Any]]] = [[], [], []]
+    cursor = 0.0
+    for item, duration in zip(sections, durations):
+        midpoint = cursor + duration / 2
+        third = min(2, int(midpoint / max(total / 3, 1e-6)))
+        bins[third].append(item)
+        cursor += duration
+    ordered: list[dict[str, Any]] = []
+    for index in range(max((len(group) for group in bins), default=0)):
+        for group in bins:
+            if index < len(group):
+                ordered.append(group[index])
+    return ordered
+
+
 def match_broll(
     work: Path,
     clips_per_section: int,
@@ -3195,7 +3260,11 @@ def match_broll(
     used_counts: dict[str, int] = {}
     last_family = ""
     matches = []
-    for section in plan["sections"]:
+    # Source-use limits are global. Processing only from the start used to
+    # consume the best sources before the closing third was considered. Visit
+    # the three timeline thirds in round-robin order, then restore section order
+    # in the output.
+    for section in _round_robin_timeline_thirds(plan["sections"]):
         if section.get("status") == "missing":
             matches.append(
                 {
@@ -3318,6 +3387,7 @@ def match_broll(
                 ],
             }
         )
+    matches.sort(key=lambda item: int(item["section"]))
     result = {
         "schema_version": 3,
         "strategy": "dense clause semantic score + multi-frame quality score + hard source reuse cap",
@@ -3433,6 +3503,34 @@ def timeline_coverage_metrics(
         if next_start > end
     ]
     visible = max(0.0, timeline_duration - covered)
+    third_duration = timeline_duration / 3 if timeline_duration else 0.0
+    thirds = []
+    for index in range(3):
+        third_start = index * third_duration
+        third_end = timeline_duration if index == 2 else (index + 1) * third_duration
+        covered_in_third = sum(
+            max(0.0, min(end, third_end) - max(start, third_start))
+            for start, end in merged
+        )
+        clip_count = sum(
+            third_start <= (start + end) / 2 < third_end + (1e-6 if index == 2 else 0)
+            for start, end in intervals
+        )
+        thirds.append(
+            {
+                "third": index + 1,
+                "clip_count": clip_count,
+                "covered_seconds": round(covered_in_third, 3),
+                "coverage_ratio": round(covered_in_third / third_duration, 4)
+                if third_duration
+                else 0.0,
+            }
+        )
+    third_ratios = [item["coverage_ratio"] for item in thirds]
+    distribution_balanced = bool(thirds) and all(item["clip_count"] > 0 for item in thirds)
+    if third_ratios:
+        distribution_balanced = distribution_balanced and min(third_ratios) >= 0.20
+        distribution_balanced = distribution_balanced and max(third_ratios) - min(third_ratios) <= 0.25
     return {
         "covered_seconds": round(covered, 3),
         "coverage_ratio": round(covered / timeline_duration, 4) if timeline_duration else 0.0,
@@ -3442,6 +3540,8 @@ def timeline_coverage_metrics(
         "interior_gaps": len(gaps),
         "short_gaps": sum(gap <= short_gap_seconds + 1e-6 for gap in gaps),
         "short_gap_seconds": round(sum(gap for gap in gaps if gap <= short_gap_seconds + 1e-6), 3),
+        "timeline_thirds": thirds,
+        "distribution_balanced": distribution_balanced,
     }
 
 
@@ -3677,6 +3777,7 @@ def inject_common_ai_broll(
     minimum: int,
     maximum: int,
     target: int,
+    case_type_override: str | None = None,
 ) -> dict[str, Any]:
     plan_path = work / plan_name
     if not plan_path.is_file():
@@ -3690,7 +3791,9 @@ def inject_common_ai_broll(
         raise FileNotFoundError("缺少媒体清单。")
     plan = load_json(plan_path)
     inventory = load_json(inventory_path)
-    inventory["case_type"] = detect_project_case_type(project, find_script(project))
+    inventory["case_type"] = detect_project_case_type(
+        project, find_script(project), case_type_override
+    )
     existing = {media_source_key(item["path"]) for item in inventory.get("b_roll", [])}
     ffmpeg = find_ffmpeg()
     added = 0
@@ -3897,7 +4000,8 @@ def compose_edit_plan(
         "b_roll_metrics": metrics_after,
         "review_required": any(item["status"] != "matched" for item in aroll_track)
         or any(item["confidence"] != "high" for item in broll_track)
-        or not metrics_after["target_met"],
+        or not metrics_after["target_met"]
+        or not metrics_after["distribution_balanced"],
     }
     write_json(work / "edit_plan.json", result)
     return result
@@ -3914,6 +4018,11 @@ def build_parser() -> argparse.ArgumentParser:
     def common(subparser: argparse.ArgumentParser) -> None:
         subparser.add_argument("--project", type=Path, required=True, help="只读素材目录")
         subparser.add_argument("--work", type=Path, required=True, help="生成文件目录")
+        subparser.add_argument(
+            "--case-type",
+            choices=("ai", "production"),
+            help="显式覆盖文件夹名中的案例类型标记",
+        )
 
     inspect_cmd = subparsers.add_parser("inspect", help="检查素材并生成清单")
     common(inspect_cmd)
@@ -4057,7 +4166,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         raise ValueError("工作目录不能等于素材目录，也不能位于素材目录内部。")
 
     if args.command == "inspect":
-        print_summary(inspect_project(project, work)["summary"])
+        print_summary(inspect_project(project, work, args.case_type)["summary"])
     elif args.command == "thumbnails":
         result = make_thumbnails(project, work, args.width)
         print_summary({"clips": len(result["clips"]), "index": str(work / "broll_index.json")})
@@ -4181,6 +4290,7 @@ def main(argv: Iterable[str] | None = None) -> int:
                 args.minimum,
                 args.maximum,
                 args.target,
+                args.case_type,
             )
         )
     return 0

@@ -1,4 +1,6 @@
 import unittest
+from tempfile import TemporaryDirectory
+from pathlib import Path
 from PIL import Image
 import chart_layout as layout
 import chart_motion as motion
@@ -29,6 +31,26 @@ class ChartLayoutTests(unittest.TestCase):
 
     def test_comparison_always_fullscreen(self):
         self.assertEqual(layout.choose_layout({'template':'comparison'},None,self.review())['mode'],'fullscreen')
+
+    def test_apply_review_does_not_measure_bilingual_comparison_as_side_card(self):
+        with TemporaryDirectory() as directory:
+            work = Path(directory)
+            layout.cp.write_json(work/'edit_plan.json',{})
+            signature = layout.cp.file_sha256(work/'edit_plan.json')
+            chart = {
+                'id':'chart_01','template':'comparison','title':'周期','title_en':'CYCLE',
+                'timeline_in':1.0,'timeline_out':6.0,'columns':['使用前','使用后'],
+                'columns_en':['BEFORE','AFTER'],'rows':[{
+                    'label':'所需时间','label_en':'TIME REQUIRED','before':'3天','before_en':'3 DAYS',
+                    'after':'1天','after_en':'1 DAY'}]}
+            layout.cp.write_json(work/'chart_plan.json',{
+                'style':{'visual_theme':'bilingual'},'charts':[chart]})
+            layout.cp.write_json(work/'chart_layout_review.json',{
+                'source_edit_plan_sha256':signature,'charts':[{
+                    'id':'chart_01','timeline_in':1.0,'timeline_out':6.0,'status':'approved',
+                    'samples':[{'protected_boxes':[]}]}]})
+            result = layout.apply_review(work)
+            self.assertEqual(result['charts'][0]['layout']['mode'],'fullscreen')
 
     def test_visible_shots_use_broll_over_aroll(self):
         plan = {'tracks':{'a_roll':[dict(source='a',source_in=20,source_out=30,timeline_in=0,timeline_out=10)],

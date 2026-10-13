@@ -1,0 +1,9 @@
+# Product runtime validated on CPython 3.12 x64.
+# Keep the ASR engine and native runtime pinned together. Allowing pip to
+# choose an arbitrary CTranslate2 build caused DLL/CUDA failures on a clean PC.
+faster-whisper==1.2.1
+ctranslate2==4.8.2
+imageio-ffmpeg==0.6.0
+opencc-python-reimplemented==0.1.7
+Pillow==12.3.0
+numpy==2.5.3

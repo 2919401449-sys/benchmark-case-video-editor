@@ -137,8 +137,31 @@ class MotionTimingTests(unittest.TestCase):
         self.assertNotEqual(base.crop((330,350,850,860)).tobytes(),
                             base.crop((1070,350,1590,860)).tobytes())
         self.assertEqual([key for key,_ in layers],["row_1_before","row_1_after"])
-        self.assertTrue(all(535 <= image.getbbox()[1] < image.getbbox()[3] <= 724
-                            for _,image in layers))
+        for index, (_, image) in enumerate(layers):
+            bbox = image.getbbox()
+            safe = motion.bilingual_comparison_text_boxes(
+                motion.BILINGUAL_COMPARISON_CENTERS[index])
+            self.assertGreaterEqual(bbox[0], safe["value"][0])
+            self.assertLessEqual(bbox[2], safe["value"][2])
+            self.assertGreaterEqual(bbox[1], safe["value"][1])
+            self.assertLessEqual(bbox[3], safe["value_en"][3])
+
+    def test_long_bilingual_comparison_values_stay_inside_ring_safe_zones(self):
+        chart={"id":"chart_09","template":"comparison","title":"小户型出图时间",
+               "title_en":"SMALL HOME RENDERING TIME",
+               "columns":["传统方式","酷家乐AI"],"columns_en":["TRADITIONAL","KUJIALE AI"],
+               "rows":[{"label":"所需时间","label_en":"TIME REQUIRED","before":"一到两天",
+                        "before_en":"1–2 DAYS","after":"不到一个小时","after_en":"LESS THAN 1 HOUR"}],
+               "layout":{"mode":"fullscreen","blur":True}}
+        _, layers = motion.layers_for_chart(chart,{"visual_theme":"bilingual"})
+        for index, (_, image) in enumerate(layers):
+            bbox = image.getbbox()
+            zones = motion.bilingual_comparison_text_boxes(
+                motion.BILINGUAL_COMPARISON_CENTERS[index])
+            self.assertGreaterEqual(bbox[0], zones["value"][0])
+            self.assertLessEqual(bbox[2], zones["value"][2])
+            self.assertGreaterEqual(bbox[1], zones["value"][1])
+            self.assertLessEqual(bbox[3], zones["value_en"][3])
 
     def test_editorial_before_value_has_opaque_background(self):
         chart = {"template": "comparison", "title": "出图时间", "columns": ["使用前", "使用后"],

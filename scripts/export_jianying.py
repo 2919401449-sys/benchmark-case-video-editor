@@ -165,6 +165,10 @@ def srt_timestamp(seconds: float) -> str:
 def clean_caption_text(text: str) -> str:
     # Captions intentionally contain no punctuation.  Punctuation that marks a
     # spoken pause becomes a normal space so the reading rhythm remains visible.
+    # A comma between digits is a thousands separator rather than a spoken
+    # pause.  Remove it without inserting a space so values such as 80,000元 do
+    # not produce an isolated 000元 caption fragment.
+    text = re.sub(r"(?<=\d)[，,](?=\d)", "", text)
     text = re.sub(r"[，,。.!！?？；;：:、—–…]+", " ", text)
     text = re.sub(r"[“”‘’\"'（）()《》〈〉【】\[\]{}·•]+", " ", text)
     text = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff\s]+", " ", text)

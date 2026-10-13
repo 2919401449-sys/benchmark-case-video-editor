@@ -17,17 +17,17 @@ import chart_pipeline as cp
 from pipeline import find_ffmpeg
 
 
-def visible_spans(plan, start, end):
+def visible_spans(plan, start, end, tracks=('a_roll', 'b_roll')):
     clips = plan['tracks']
     cuts = {start, end}
-    for track in ('a_roll', 'b_roll'):
+    for track in tracks:
         for clip in clips.get(track, []):
             cuts.update(t for t in (clip['timeline_in'], clip['timeline_out']) if start < t < end)
     ordered = sorted(cuts)
     result = []
     for lo, hi in zip(ordered, ordered[1:]):
         mid = (lo + hi) / 2
-        active = [c for track in ('a_roll', 'b_roll') for c in clips.get(track, [])
+        active = [c for track in tracks for c in clips.get(track, [])
                   if c['timeline_in'] <= mid < c['timeline_out']]
         if not active:
             raise ValueError(f'Uncovered timeline at {mid}')
@@ -78,15 +78,56 @@ def prepare(work):
     return review
 
 
+def approve_boxes(work, boxes_path):
+    """Apply reviewed per-chart union boxes to every sampled frame.
+
+    The caller must first inspect every contact sheet. A union box is useful
+    when the same subject moves slightly during a shot and guarantees that the
+    chosen side remains safe for the complete chart interval.
+    """
+    review = cp.load_json(work / 'chart_layout_review.json')
+    values = cp.load_json(boxes_path).get('charts', {})
+    for chart in review['charts']:
+        if chart['id'] not in values:
+            raise ValueError(f"Missing reviewed boxes for {chart['id']}")
+        boxes = values[chart['id']]
+        if not isinstance(boxes, list):
+            raise ValueError(f"Invalid reviewed boxes for {chart['id']}")
+        for box in boxes:
+            if len(box) != 4 or not (0 <= box[0] < box[2] <= 1920 and 0 <= box[1] < box[3] <= 1080):
+                raise ValueError(f"Invalid protected box: {box}")
+        for sample in chart['samples']:
+            sample['protected_boxes'] = boxes
+        chart['status'] = 'approved'
+    cp.write_json(work / 'chart_layout_review.json', review)
+    return review
+
+
 def intersects(a, b, margin=30):
     return a[0] < b[2]+margin and a[2] > b[0]-margin and a[1] < b[3]+margin and a[3] > b[1]-margin
 
 
 def choose_layout(chart, base_bounds, reviewed):
+    if chart['template'] == 'parallelism':
+        return {'mode': 'fullscreen', 'blur': False, 'exclude_broll': True,
+                'reason': '排比句使用全屏逐项冲击动效，以A-roll为底并让出B-roll配额'}
     if chart['template'] == 'comparison':
         return {'mode': 'fullscreen', 'blur': True, 'reason': '前后对比优先全屏展示'}
     boxes = [box for sample in reviewed['samples'] for box in sample['protected_boxes']]
     width, height = base_bounds[2]-base_bounds[0], base_bounds[3]-base_bounds[1]
+    if chart.get('layout_preference') == 'side':
+        side = chart.get('placement', 'left')
+        if side not in ('left', 'right'):
+            raise ValueError('layout_preference=side requires placement left or right')
+        scale = min(1.0, max(0.75, float(chart.get('side_scale', 0.8))))
+        if 110 + round(height * scale) > 935:
+            scale = max(0.75, (935 - 110) / height)
+        w, h = round(width * scale), round(height * scale)
+        if 110 + h > 935:
+            raise ValueError('Side chart cannot fit above the caption safe area')
+        x = 32 if side == 'left' else 1920 - 32 - w
+        return {'mode': side, 'blur': False, 'box': [x, 110, x+w, 110+h],
+                'reason': '逐帧审核后指定单边卡片，避免长时间全屏模糊'}
     # Fit one consistent card across all shots. Do not shrink until unreadable.
     for scale in (1.0, 0.9, 0.8, 0.75):
         w, h = round(width*scale), round(height*scale)
@@ -122,8 +163,15 @@ def apply_review(work):
                 if len(box) != 4 or not (0 <= box[0] < box[2] <= 1920 and 0 <= box[1] < box[3] <= 1080):
                     raise ValueError(f'Invalid protected box: {box}')
         raw = {k:v for k,v in chart.items() if k != 'layout'}
-        base, _ = motion.layers_for_chart(raw, plan.get('style', {}))
-        chart['layout'] = choose_layout(chart, base.getbbox(), item)
+        # Comparisons are always full-screen, so their layout does not depend
+        # on the side-card artwork bounds.  In particular, the bilingual
+        # comparison renderer only exists in its full-screen form and must not
+        # be measured through the bilingual side-card renderer first.
+        if chart['template'] in ('comparison', 'parallelism'):
+            chart['layout'] = choose_layout(chart, None, item)
+        else:
+            base, _ = motion.layers_for_chart(raw, plan.get('style', {}))
+            chart['layout'] = choose_layout(chart, base.getbbox(), item)
         chart['layout']['review_source'] = str((work/'chart_layout_review.json').resolve())
     plan['layout_policy'] = 'subject_safe'
     plan['layout_review_sha256'] = cp.file_sha256(work/'chart_layout_review.json')
@@ -143,7 +191,10 @@ def transform_layer(image, source_box, layout):
 
 def render_blur(work, chart, directory, fps):
     plan = cp.load_json(work/'edit_plan.json')
-    spans = visible_spans(plan, chart['timeline_in'], chart['timeline_out'])
+    # A blurred chart replaces B-roll for its complete interval.  Build the
+    # blur from the underlying interview footage so a hidden B-roll clip does
+    # not consume a source-use slot merely to become an unreadable backdrop.
+    spans = visible_spans(plan, chart['timeline_in'], chart['timeline_out'], tracks=('a_roll',))
     parts = []
     # Frame-quantized boundaries guarantee no drift over B-roll cuts.
     total_frames = round((chart['timeline_out']-chart['timeline_in'])*fps)
@@ -166,6 +217,7 @@ def render_blur(work, chart, directory, fps):
     return {'chart_id': chart['id'], 'layer_key': 'background_blur', 'source': str(target.resolve()),
             'source_in': 0, 'source_out': total_frames/fps, 'timeline_in': chart['timeline_in'],
             'timeline_out': chart['timeline_out'], 'template': 'background_blur', 'z_group': 0,
+            'background_source_policy': 'a_roll_only',
             'status': 'approved', 'keyframes': [
                 {'property':'alpha','time':t,'value':a} for t,a in
                 [(0,0),(0.24,1),(chart['timeline_out']-chart['timeline_in']-0.24,1),
@@ -174,7 +226,15 @@ def render_blur(work, chart, directory, fps):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=['prepare','apply'])
+    parser.add_argument('action', choices=['prepare','approve-boxes','apply'])
     parser.add_argument('--work', type=Path, required=True)
+    parser.add_argument('--boxes', type=Path)
     args = parser.parse_args()
-    (prepare if args.action == 'prepare' else apply_review)(args.work)
+    if args.action == 'prepare':
+        prepare(args.work)
+    elif args.action == 'approve-boxes':
+        if not args.boxes:
+            raise ValueError('approve-boxes requires --boxes')
+        approve_boxes(args.work, args.boxes)
+    else:
+        apply_review(args.work)

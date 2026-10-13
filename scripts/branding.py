@@ -17,7 +17,8 @@ SERIES_TEXT = "设计生产一体化|定制标杆工厂系列"
 ASSETS = Path(__file__).resolve().parents[1] / "assets" / "branding"
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 LOGO_MARGIN = 24
-LOGO_HEIGHT = round(46 * 1.20)  # 55 px; fixed baseline, never compound per run
+PAIR_LOGO_HEIGHT = 70  # visually balances the wider AI-platform wordmark
+AI_LOGO_HEIGHT = round(46 * 1.20)  # 55 px; keep the verified right-header size
 PAIR_GAP = 18
 # The fixed preset asset has a transparent gap between its colored AI mark and
 # dark wordmark. Only pixels after that gap are turned white.
@@ -93,9 +94,9 @@ def _load_logo(source: Path, crop=None) -> Image.Image:
         return art.crop(bounds)
 
 
-def _fit_visible_height(art: Image.Image) -> Image.Image:
-    width = max(1, round(art.width * LOGO_HEIGHT / art.height))
-    return art.resize((width, LOGO_HEIGHT), Image.Resampling.LANCZOS)
+def _fit_visible_height(art: Image.Image, height: int) -> Image.Image:
+    width = max(1, round(art.width * height / art.height))
+    return art.resize((width, height), Image.Resampling.LANCZOS)
 
 
 def _white_wordmark(art: Image.Image) -> Image.Image:
@@ -110,13 +111,13 @@ def _ai_logo_with_white_text(source: Path) -> Image.Image:
         raise ValueError("AI 平台预设 Logo 宽度异常，无法区分彩色图案和文字。")
     lettering = art.crop((AI_WORDMARK_START, 0, art.width, art.height))
     art.paste(_white_wordmark(lettering), (AI_WORDMARK_START, 0))
-    return _fit_visible_height(art)
+    return _fit_visible_height(art, AI_LOGO_HEIGHT)
 
 
 def _place_pair(layer: Image.Image, kujiale_logo: Path, customer_logo: Path,
                 align: str, customer_crop=None) -> dict:
-    kujiale = _fit_visible_height(_white_wordmark(_load_logo(kujiale_logo)))
-    customer = _fit_visible_height(_load_logo(customer_logo, customer_crop))
+    kujiale = _fit_visible_height(_white_wordmark(_load_logo(kujiale_logo)), PAIR_LOGO_HEIGHT)
+    customer = _fit_visible_height(_load_logo(customer_logo, customer_crop), PAIR_LOGO_HEIGHT)
     total_width = kujiale.width + customer.width + 2 * PAIR_GAP + 2
     if total_width > CANVAS[0] - 2 * LOGO_MARGIN:
         raise ValueError("品牌组合过宽，无法放入画面。")
@@ -125,12 +126,12 @@ def _place_pair(layer: Image.Image, kujiale_logo: Path, customer_logo: Path,
     separator_x = x + kujiale.width + PAIR_GAP
     customer_x = separator_x + 2 + PAIR_GAP
     layer.alpha_composite(kujiale, (x, y))
-    ImageDraw.Draw(layer).line((separator_x, y + 5, separator_x, y + LOGO_HEIGHT - 6),
+    ImageDraw.Draw(layer).line((separator_x, y + 6, separator_x, y + PAIR_LOGO_HEIGHT - 7),
                                fill=(255, 255, 255, 255), width=2)
     layer.alpha_composite(customer, (customer_x, y))
-    return {"kujiale_bbox": [x, y, x + kujiale.width, y + LOGO_HEIGHT],
-            "separator_bbox": [separator_x, y + 5, separator_x + 2, y + LOGO_HEIGHT - 5],
-            "customer_bbox": [customer_x, y, customer_x + customer.width, y + LOGO_HEIGHT]}
+    return {"kujiale_bbox": [x, y, x + kujiale.width, y + PAIR_LOGO_HEIGHT],
+            "separator_bbox": [separator_x, y + 6, separator_x + 2, y + PAIR_LOGO_HEIGHT - 6],
+            "customer_bbox": [customer_x, y, customer_x + customer.width, y + PAIR_LOGO_HEIGHT]}
 
 
 def render_headers(case_type: str, customer_logo: Path, destination: Path,
@@ -150,7 +151,7 @@ def render_headers(case_type: str, customer_logo: Path, destination: Path,
         right.alpha_composite(ai_art, (ai_x, LOGO_MARGIN))
         layout = {"pair": pair,
                   "ai_platform_bbox": [ai_x, LOGO_MARGIN, CANVAS[0] - LOGO_MARGIN,
-                                       LOGO_MARGIN + LOGO_HEIGHT]}
+                                       LOGO_MARGIN + AI_LOGO_HEIGHT]}
     elif case_type == "production":
         d = ImageDraw.Draw(left)
         d.rounded_rectangle((34, 8, 726, 72), radius=18, fill=(23, 111, 203, 232))

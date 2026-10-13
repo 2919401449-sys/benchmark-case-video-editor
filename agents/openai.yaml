@@ -1,4 +1,4 @@
 interface:
   display_name: "标杆案例自动剪辑"
-  short_description: "连贯压缩口播、匹配低重复B-roll并生成剪映草稿"
-  default_prompt: "请使用 $benchmark-case-video-editor 检查素材，生成连贯的A-roll文稿，以每条素材最多两次的规则匹配B-roll，并输出可复核的剪映草稿。"
+  short_description: "可断点续跑地生成A/B-roll、动态图表和剪映草稿"
+  default_prompt: "请使用 $benchmark-case-video-editor 的产品运行器处理这个案例。先检查固定环境，再从 run_state.json 断点续跑；不要临时安装依赖、切换Python或重新处理已经完成的阶段。"

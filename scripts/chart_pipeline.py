@@ -25,7 +25,7 @@ SCHEMA_VERSION = 1
 DEFAULT_WIDTH = 1920
 DEFAULT_HEIGHT = 1080
 DEFAULT_COUNT = 7
-SUPPORTED_TEMPLATES = {"stat", "comparison", "list", "flow"}
+SUPPORTED_TEMPLATES = {"stat", "comparison", "list", "flow", "parallelism"}
 
 FONT_REGULAR_CANDIDATES = [
     Path(r"C:\Windows\Fonts\msyh.ttc"),
@@ -102,6 +102,34 @@ def split_clauses(text: str) -> list[str]:
     return [part for part in clauses if len(part) >= 4]
 
 
+def extract_parallel_phrases(text: str) -> list[str]:
+    """Find a conservative 3–5 item Chinese parallel construction.
+
+    The automatic path deliberately targets the common short “……化” pattern.
+    Broader rhetorical parallelism is left to the semantic review gate so an
+    ordinary list is not accidentally promoted to the high-impact template.
+    """
+    compact = re.sub(r"[^\u4e00-\u9fff]", "", clean_text(text))
+    endings = [match.end() for match in re.finditer("化", compact)
+               if compact[match.end():match.end() + 1] != "为"]
+    if len(endings) < 3:
+        return []
+    items: list[str] = []
+    previous = 0
+    leading = re.compile(r"^(?:真正实现|实现|做到|能够|可以|并且|同时|以及|让|使)+")
+    for end in endings[:5]:
+        segment = leading.sub("", compact[previous:end])
+        if len(segment) > 7:
+            segment = segment[-5:]
+        previous = end
+        if 4 <= len(segment) <= 7 and segment.endswith("化") and segment not in items:
+            items.append(segment)
+    if not 3 <= len(items) <= 5:
+        return []
+    lengths = [len(item) for item in items]
+    return items if max(lengths) - min(lengths) <= 2 else []
+
+
 def infer_title(text: str, template: str) -> str:
     rules = [
         (("成立", "年"), "企业积淀"),
@@ -123,6 +151,7 @@ def infer_title(text: str, template: str) -> str:
         "comparison": "使用前后对比",
         "list": "核心价值",
         "flow": "工作流程",
+        "parallelism": "核心能力矩阵",
     }[template]
 
 
@@ -176,9 +205,17 @@ def candidate_from_subtitle(item: dict[str, Any]) -> dict[str, Any] | None:
     metrics = extract_metrics(text)
     comparison_cues = ("压缩到", "传统", "使用前", "使用后", "提升", "降低", "缩短", "减少", "增加")
     clauses = split_clauses(text)
+    parallel_items = extract_parallel_phrases(text)
 
     comparison = _comparison_items(text, metrics) if len(metrics) >= 2 else {}
-    if comparison and any(cue in text for cue in comparison_cues):
+    if parallel_items:
+        template = "parallelism"
+        content = {"items": parallel_items}
+        # Prefer the complete rhetorical series when it spans adjacent
+        # retained subtitles; a trailing three-item fragment must not beat
+        # the full four- or five-item construction.
+        score = 8.5 + 0.7 * len(parallel_items)
+    elif comparison and any(cue in text for cue in comparison_cues):
         template = "comparison"
         content = comparison
         score = 8.0 + min(len(metrics), 3)
@@ -254,10 +291,11 @@ def motion_proposals(edit_plan: dict[str, Any]) -> list[dict[str, Any]]:
                 continue
             merged = {**first, "text": " ".join(s["text"] for s in group), "timeline_out": group[-1]["timeline_out"]}
             candidate = candidate_from_subtitle(merged)
-            if candidate and candidate["template"] in ("flow", "list", "comparison"):
+            if candidate and candidate["template"] in ("flow", "list", "comparison", "parallelism"):
                 candidate["section_ids"] = [s["section"] for s in group]
                 candidate["candidate_id"] += f"_through_{group[-1]['section']}"
-                candidate["score"] -= 0.4 * (count - 1)
+                if candidate["template"] != "parallelism":
+                    candidate["score"] -= 0.4 * (count - 1)
                 proposals.append(candidate)
     # Spoken use constraints and benefits are useful graphics even without a KPI.
     for s in subtitles:
@@ -278,9 +316,33 @@ def select_spread_candidates(
     proposals: list[dict[str, Any]],
     count: int,
     min_gap_seconds: float,
+    timeline_duration: float,
 ) -> list[dict[str, Any]]:
     selected: list[dict[str, Any]] = []
-    for candidate in sorted(proposals, key=lambda item: (-float(item["score"]), item["timeline_in"])):
+    ranked = sorted(proposals, key=lambda item: (-float(item["score"]), item["timeline_in"]))
+
+    # Reserve one slot for each timeline third before filling by global score.
+    # This prevents a dense cluster of late KPI sentences from pushing every
+    # chart into the second half.
+    if timeline_duration > 0 and count >= 3:
+        for third in range(3):
+            start = timeline_duration * third / 3
+            end = timeline_duration * (third + 1) / 3
+            for candidate in ranked:
+                center = (float(candidate["timeline_in"]) + float(candidate["timeline_out"])) / 2
+                if not (start <= center < end + (1e-6 if third == 2 else 0)):
+                    continue
+                if all(
+                    abs(center - (float(other["timeline_in"]) + float(other["timeline_out"])) / 2)
+                    >= min_gap_seconds
+                    for other in selected
+                ):
+                    selected.append(candidate)
+                    break
+
+    for candidate in ranked:
+        if candidate in selected:
+            continue
         center = (float(candidate["timeline_in"]) + float(candidate["timeline_out"])) / 2
         if all(
             abs(center - (float(other["timeline_in"]) + float(other["timeline_out"])) / 2)
@@ -299,7 +361,8 @@ def propose_charts(work: Path, count: int, min_gap_seconds: float, motion: bool 
         raise FileNotFoundError("需要先生成 edit_plan.json。")
     edit_plan = load_json(edit_plan_path)
     proposals = motion_proposals(edit_plan) if motion else proposals_from_edit_plan(edit_plan)
-    selected = select_spread_candidates(proposals, count, min_gap_seconds)
+    timeline_duration = float(edit_plan.get("timeline", {}).get("duration_seconds", 0.0))
+    selected = select_spread_candidates(proposals, count, min_gap_seconds, timeline_duration)
     charts = []
     for index, candidate in enumerate(selected, start=1):
         chart = dict(candidate)
@@ -312,6 +375,17 @@ def propose_charts(work: Path, count: int, min_gap_seconds: float, motion: bool 
             from chart_motion import suggested_cues
             chart["cues"] = suggested_cues(chart, {int(s["section"]): s for s in edit_plan["tracks"]["subtitles"]})
         charts.append(chart)
+    chart_centers = [
+        (float(item["timeline_in"]) + float(item["timeline_out"])) / 2 for item in charts
+    ]
+    thirds = [
+        sum(
+            timeline_duration * index / 3 <= center
+            < timeline_duration * (index + 1) / 3 + (1e-6 if index == 2 else 0)
+            for center in chart_centers
+        )
+        for index in range(3)
+    ] if timeline_duration else [0, 0, 0]
     result = {
         "schema_version": SCHEMA_VERSION,
         "source_edit_plan": str(edit_plan_path.resolve()),
@@ -329,6 +403,10 @@ def propose_charts(work: Path, count: int, min_gap_seconds: float, motion: bool 
         "charts": charts,
         "review_required": True,
         "review_note": "自动提案必须核对文字、数字、使用前后方向和出现时间；确认后把 status 改为 approved。",
+        "distribution": {
+            "timeline_third_counts": thirds,
+            "covers_all_thirds": all(value > 0 for value in thirds),
+        },
         "motion": {"enabled": motion},
     }
     write_json(work / "chart_candidates.json", {"schema_version": 1, "candidates": proposals})
@@ -524,6 +602,13 @@ def validate_chart_plan(
         template = chart["template"]
         if template in ("list", "flow") and not 2 <= len(chart.get("items", [])) <= (4 if template == "list" else 5):
             raise ValueError(f"{chart_id} 的列表需 2–4 项，流程需 2–5 项。")
+        if template == "parallelism":
+            items = chart.get("items", [])
+            items_en = chart.get("items_en", [])
+            if not 3 <= len(items) <= 5:
+                raise ValueError(f"{chart_id} 的排比冲击图需 3–5 项。")
+            if not chart.get("title_en") or not isinstance(items_en, list) or len(items_en) != len(items):
+                raise ValueError(f"{chart_id} 的排比冲击图须有 title_en 及逐项对应的 items_en。")
         if template == "comparison" and (len(chart.get("columns", [])) != 2 or not 1 <= len(chart.get("rows", [])) <= 3):
             raise ValueError(f"{chart_id} 对比图需两列及 1–3 行。")
         timeline_in = float(chart["timeline_in"])
@@ -546,6 +631,23 @@ def validate_chart_plan(
         for item in edit_plan.get("tracks", {}).get("subtitles", [])
     }
     timeline_duration = float(edit_plan.get("timeline", {}).get("duration_seconds", 0.0))
+    centers = [
+        (float(chart["timeline_in"]) + float(chart["timeline_out"])) / 2
+        for chart in charts
+    ]
+    if len(charts) >= 3 and timeline_duration > 0:
+        third_counts = [
+            sum(
+                timeline_duration * index / 3 <= center
+                < timeline_duration * (index + 1) / 3 + (1e-6 if index == 2 else 0)
+                for center in centers
+            )
+            for index in range(3)
+        ]
+        if not all(third_counts):
+            raise ValueError(f"图表分布失衡，前中后三段数量为 {third_counts}；每段至少需要一张图表。")
+        if min(centers) > timeline_duration * 0.35 or max(centers) < timeline_duration * 0.65:
+            raise ValueError("图表过度集中在单侧时间段；第一张需在前35%，最后一张需在后35%。")
     for chart in charts:
         chart_id = str(chart["id"])
         sections = [int(value) for value in chart.get("section_ids", [])]
@@ -599,6 +701,7 @@ def render_charts(work: Path, plan_path: Path | None = None) -> dict[str, Any]:
         "comparison": render_comparison,
         "list": render_list,
         "flow": render_flow,
+        "parallelism": render_list,
     }
     for chart in plan["charts"]:
         canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
@@ -681,6 +784,7 @@ def attach_charts(work: Path, base_plan_path: Path | None = None) -> dict[str, A
             }
         )
     result = json.loads(json.dumps(base_plan, ensure_ascii=False))
+    suppress_broll_under_blurred_charts(result, chart_plan)
     result["schema_version"] = max(3, int(result.get("schema_version", 1)))
     result.setdefault("tracks", {})["graphics"] = graphics
     result["chart_metrics"] = {
@@ -693,6 +797,114 @@ def attach_charts(work: Path, base_plan_path: Path | None = None) -> dict[str, A
     output = work / "edit_plan_with_charts.json"
     write_json(output, result)
     return result
+
+
+def suppress_broll_under_blurred_charts(
+    edit_plan: dict[str, Any], chart_plan: dict[str, Any], minimum_fragment_seconds: float = 0.8
+) -> dict[str, Any]:
+    """Remove B-roll under blur or an approved full-frame impact overlay.
+
+    At most one surviving fragment is kept from each original placement.  This
+    prevents a single placement split around a chart from being counted as two
+    source uses and makes the freed quota available to other parts of the edit.
+    """
+    intervals = sorted(
+        (float(chart["timeline_in"]), float(chart["timeline_out"]), chart["id"])
+        for chart in chart_plan.get("charts", [])
+        if chart.get("layout", {}).get("blur") or chart.get("layout", {}).get("exclude_broll")
+    )
+    tracks = edit_plan.setdefault("tracks", {})
+    original = list(tracks.get("b_roll", []))
+    if not intervals or not original:
+        return {"intervals": intervals, "changed_clips": 0, "removed_seconds": 0.0}
+
+    kept: list[dict[str, Any]] = []
+    changed = 0
+    removed_seconds = 0.0
+    for clip in original:
+        start, end = float(clip["timeline_in"]), float(clip["timeline_out"])
+        fragments = [(start, end)]
+        for blur_start, blur_end, _ in intervals:
+            next_fragments = []
+            for lo, hi in fragments:
+                if hi <= blur_start or lo >= blur_end:
+                    next_fragments.append((lo, hi))
+                    continue
+                if lo < blur_start:
+                    next_fragments.append((lo, min(hi, blur_start)))
+                if hi > blur_end:
+                    next_fragments.append((max(lo, blur_end), hi))
+            fragments = next_fragments
+        eligible = [item for item in fragments if item[1] - item[0] >= minimum_fragment_seconds]
+        if not eligible:
+            changed += 1
+            removed_seconds += end - start
+            continue
+        new_start, new_end = max(eligible, key=lambda item: item[1] - item[0])
+        if abs(new_start - start) > 1e-6 or abs(new_end - end) > 1e-6:
+            changed += 1
+            removed_seconds += (end - start) - (new_end - new_start)
+        clone = json.loads(json.dumps(clip, ensure_ascii=False))
+        rate = (float(clip["source_out"]) - float(clip["source_in"])) / (end - start)
+        clone["source_in"] = round(float(clip["source_in"]) + (new_start - start) * rate, 4)
+        clone["source_out"] = round(float(clip["source_in"]) + (new_end - start) * rate, 4)
+        clone["timeline_in"] = round(new_start, 4)
+        clone["timeline_out"] = round(new_end, 4)
+        kept.append(clone)
+
+    kept.sort(key=lambda item: (float(item["timeline_in"]), float(item["timeline_out"])))
+    tracks["b_roll"] = kept
+
+    from pipeline import media_source_key, timeline_coverage_metrics
+
+    duration = float(edit_plan.get("timeline", {}).get("duration_seconds", 0.0))
+    metrics = dict(edit_plan.get("b_roll_metrics", {}))
+    metrics.update(timeline_coverage_metrics(kept, duration, 1.5))
+    use_counts: dict[str, int] = {}
+    for clip in kept:
+        key = media_source_key(clip["source"])
+        use_counts[key] = use_counts.get(key, 0) + 1
+    common = [clip for clip in kept if clip.get("origin") == "skill_common_ai"]
+    common_sources = {media_source_key(clip["source"]) for clip in common}
+    thirds = [0, 0, 0]
+    if duration:
+        for clip in common:
+            index = min(2, int(((float(clip["timeline_in"]) + float(clip["timeline_out"])) / 2) / (duration / 3)))
+            thirds[index] += 1
+    metrics.update({
+        "common_ai_recordings_used": len(common_sources),
+        "common_ai_each_used_at_most_once": all(use_counts[source] <= 1 for source in common_sources),
+        "maximum_observed_source_uses": max(use_counts.values(), default=0),
+        "source_use_limit_respected": all(
+            count <= max(
+                int(clip.get("max_source_uses", 2))
+                for clip in kept if media_source_key(clip["source"]) == source
+            )
+            for source, count in use_counts.items()
+        ),
+        "unique_sources_used": len(use_counts),
+        "source_use_counts": dict(sorted(use_counts.items())),
+        "blur_chart_exclusion": {
+            "policy": "no_b_roll_under_full_frame_blur_or_impact_overlay",
+            "intervals": [
+                {"chart_id": chart_id, "timeline_in": start, "timeline_out": end}
+                for start, end, chart_id in intervals
+            ],
+            "changed_or_removed_placements": changed,
+            "removed_seconds": round(removed_seconds, 3),
+        },
+    })
+    quota = metrics.get("common_ai_quota")
+    if isinstance(quota, dict):
+        quota["used"] = len(common_sources)
+        quota["distribution"] = thirds
+    edit_plan["b_roll_metrics"] = metrics
+
+    for clip in kept:
+        for blur_start, blur_end, chart_id in intervals:
+            if float(clip["timeline_in"]) < blur_end and float(clip["timeline_out"]) > blur_start:
+                raise ValueError(f"B-roll still overlaps an exclusive full-frame chart {chart_id}")
+    return metrics["blur_chart_exclusion"]
 
 
 def build_parser() -> argparse.ArgumentParser:
